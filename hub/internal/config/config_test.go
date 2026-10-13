@@ -65,3 +65,19 @@ func TestSyncExclusionAndNamingEnv(t *testing.T) {
 		}
 	}
 }
+
+func TestAllowMassDisableEnv(t *testing.T) {
+	m := map[string]string{"NAVIDROME_URL": "http://navidrome.example.com", "INGEST_SECRET": strings.Repeat("x", 32)}
+	c, _ := FromEnv(env(m))
+	if c.UserSyncAllowMassDisable {
+		t.Fatal("off by default")
+	}
+	m["CERCLE_USER_SYNC_ALLOW_MASS_DISABLE"] = "true"
+	if c, err := FromEnv(env(m)); err != nil || !c.UserSyncAllowMassDisable {
+		t.Fatalf("true: %v", err)
+	}
+	m["CERCLE_USER_SYNC_ALLOW_MASS_DISABLE"] = "maybe"
+	if _, err := FromEnv(env(m)); err == nil {
+		t.Fatal("invalid bool must fail")
+	}
+}

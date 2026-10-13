@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/netip"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -28,6 +29,8 @@ type Config struct {
 	NavidromeAdminUser     string
 	NavidromeAdminPassword string
 	UserSyncInterval       time.Duration
+	// UserSyncAllowMassDisable lifts the "at most max(1, 20%) disables per run" guard.
+	UserSyncAllowMassDisable bool
 	// ExcludedUsers holds lowercased usernames of service accounts.
 	ExcludedUsers map[string]bool
 	// EveryoneName / EveryoneDescription are applied at startup when non-empty.
@@ -97,6 +100,13 @@ func FromEnv(getenv func(string) string) (*Config, error) {
 		errs = append(errs, fmt.Errorf("CERCLE_USER_SYNC_INTERVAL %q: want a duration of at least 1m", getenv("CERCLE_USER_SYNC_INTERVAL")))
 	}
 	c.UserSyncInterval = iv
+	if v := strings.TrimSpace(getenv("CERCLE_USER_SYNC_ALLOW_MASS_DISABLE")); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("CERCLE_USER_SYNC_ALLOW_MASS_DISABLE %q: want true or false", v))
+		}
+		c.UserSyncAllowMassDisable = b
+	}
 	for _, u := range splitList(getenv("CERCLE_EXCLUDED_USERS")) {
 		c.ExcludedUsers[strings.ToLower(u)] = true
 	}

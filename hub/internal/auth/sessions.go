@@ -24,6 +24,7 @@ var ErrNoSession = errors.New("no session")
 const (
 	SessionTTL     = 30 * 24 * time.Hour
 	refreshEvery   = 24 * time.Hour
+	usedEvery      = 5 * time.Minute
 	tokenRandBytes = 32
 )
 
@@ -47,8 +48,8 @@ func (s *Sessions) Create(ctx context.Context, username string) (string, error) 
 	}
 	tok := base64.RawURLEncoding.EncodeToString(b)
 	now := s.Now()
-	_, err := s.DB.W.ExecContext(ctx, `INSERT INTO sessions (token_hash, username, created_at, expires_at, refreshed_at)
-		VALUES (?, ?, ?, ?, ?)`, HashToken(tok), username, now.UnixMilli(), now.Add(SessionTTL).UnixMilli(), now.UnixMilli())
+	_, err := s.DB.W.ExecContext(ctx, `INSERT INTO sessions (token_hash, username, created_at, expires_at, refreshed_at, last_used_at)
+		VALUES (?, ?, ?, ?, ?, ?)`, HashToken(tok), username, now.UnixMilli(), now.Add(SessionTTL).UnixMilli(), now.UnixMilli(), now.UnixMilli())
 	if err != nil {
 		return "", err
 	}
@@ -63,8 +64,9 @@ func (s *Sessions) Lookup(ctx context.Context, tok string) (string, error) {
 	h := HashToken(tok)
 	var user string
 	var exp, refreshed int64
-	err := s.DB.R.QueryRowContext(ctx, `SELECT username, expires_at, refreshed_at FROM sessions WHERE token_hash = ?`, h).
-		Scan(&user, &exp, &refreshed)
+	var used sql.NullInt64
+	err := s.DB.R.QueryRowContext(ctx, `SELECT username, expires_at, refreshed_at, last_used_at FROM sessions WHERE token_hash = ?`, h).
+		Scan(&user, &exp, &refreshed, &used)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", ErrNoSession
 	}
@@ -77,8 +79,10 @@ func (s *Sessions) Lookup(ctx context.Context, tok string) (string, error) {
 		return "", ErrNoSession
 	}
 	if now.UnixMilli()-refreshed >= refreshEvery.Milliseconds() {
-		_, _ = s.DB.W.ExecContext(ctx, `UPDATE sessions SET expires_at = ?, refreshed_at = ? WHERE token_hash = ?`,
-			now.Add(SessionTTL).UnixMilli(), now.UnixMilli(), h)
+		_, _ = s.DB.W.ExecContext(ctx, `UPDATE sessions SET expires_at = ?, refreshed_at = ?, last_used_at = ? WHERE token_hash = ?`,
+			now.Add(SessionTTL).UnixMilli(), now.UnixMilli(), now.UnixMilli(), h)
+	} else if !used.Valid || now.UnixMilli()-used.Int64 >= usedEvery.Milliseconds() {
+		_, _ = s.DB.W.ExecContext(ctx, `UPDATE sessions SET last_used_at = ? WHERE token_hash = ?`, now.UnixMilli(), h)
 	}
 	return user, nil
 }

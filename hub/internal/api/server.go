@@ -87,9 +87,12 @@ func New(cfg *config.Config, d *db.DB, nav auth.Navidrome, version string, log *
 		SyncDone: make(chan struct{}),
 		ensured:  map[string]bool{},
 	}
-	if lister, ok := nav.(auth.UserLister); ok && cfg.UserSyncEnabled() {
-		s.Syncer = &usersync.Syncer{Nav: lister, AdminUser: cfg.NavidromeAdminUser, AdminPassword: cfg.NavidromeAdminPassword,
-			DB: d, Users: us, Vis: vis, Live: lv, Now: now, Log: log}
+	if cfg.UserSyncEnabled() {
+		s.Syncer = &usersync.Syncer{
+			Nav: auth.NewNativeNavidrome(cfg.NavidromeURL, cfg.NavidromeAdminUser, cfg.NavidromeAdminPassword),
+			DB:  d, Users: us, Vis: vis, Live: lv, Now: now, Log: log,
+			AllowMassDisable: cfg.UserSyncAllowMassDisable,
+		}
 	}
 	s.Subsonic = &subsonic.Handler{Nav: nav, Users: us, Live: lv, Limiter: s.Limiter,
 		TrustedProxies: cfg.TrustedProxies, Version: version, Now: now, Log: log}

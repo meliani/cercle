@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"net/http"
 	"path/filepath"
 	"testing"
@@ -11,7 +10,7 @@ import (
 )
 
 func withSync(c *config.Config) {
-	c.NavidromeAdminUser, c.NavidromeAdminPassword = "alice", "pw-alice"
+	c.NavidromeAdminUser, c.NavidromeAdminPassword = "admin", "pw-admin"
 	c.UserSyncInterval = 15 * time.Minute
 }
 
@@ -64,101 +63,6 @@ func (e *env) userExists(name string) bool {
 		e.t.Fatal(err)
 	}
 	return n > 0
-}
-
-func TestUserSyncCreatesDisablesReenables(t *testing.T) {
-	e := newEnv(t, withSync, withExcluded("admin"))
-	// The startup sync created everyone in Navidrome, before any login or play.
-	for _, u := range []string{"alice", "bob", "carol", "dave"} {
-		if !e.userExists(u) {
-			t.Fatalf("%s should exist after the startup sync", u)
-		}
-	}
-	if got := e.userNames("alice"); len(got) != 3 || !contains(got, "dave") {
-		t.Fatalf("GET /users lists synced users sharing everyone: %v", got)
-	}
-	if e.everyoneCount("alice") != 4 {
-		t.Fatal("everyone has the 4 synced users")
-	}
-	e.nav.mu.Lock()
-	sawP, calls := e.nav.getUsersSawPassword, e.nav.getUsersCalls
-	e.nav.mu.Unlock()
-	if calls == 0 || sawP {
-		t.Fatalf("getUsers must use token auth (calls=%d, saw p=%v)", calls, sawP)
-	}
-
-	// A new family member appears in Navidrome.
-	e.nav.addUser("erin", false)
-	r, err := e.srv.Syncer.Sync(context.Background())
-	if err != nil || r.Created != 1 || r.Excluded != 1 {
-		t.Fatalf("sync: %+v %v", r, err)
-	}
-	if !contains(e.userNames("bob"), "erin") || e.everyoneCount("bob") != 5 {
-		t.Fatal("erin is in everyone without ever logging in")
-	}
-	var alice struct {
-		IsAdmin bool `json:"is_admin"`
-	}
-	e.must(200, "GET", "/api/v1/users/alice", "bob", nil, &alice)
-	if !alice.IsAdmin {
-		t.Fatal("is_admin comes from adminRole")
-	}
-
-	// bob is active, then deleted from Navidrome.
-	e.token("bob")
-	e.scrobble("bob", track("t1", "al1", "ar1"), t0.Add(-10*time.Minute))
-	e.ingest(nowPlayingEv("bob", track("t2", "al1", "ar1"), t0))
-	if !e.sees("alice", "bob", "listened") || !contains(e.liveUsers("alice"), "bob") {
-		t.Fatal("bob visible before removal")
-	}
-	fam := e.createCircle("alice", "Family", "bob")
-	e.nav.removeUser("bob")
-	r, err = e.srv.Syncer.Sync(context.Background())
-	if err != nil || r.Disabled != 1 {
-		t.Fatalf("sync after removal: %+v %v", r, err)
-	}
-	if contains(e.userNames("alice"), "bob") || e.everyoneCount("alice") != 4 {
-		t.Fatal("disabled bob is excluded from lists and member counts")
-	}
-	var famDetail struct {
-		MemberCount int `json:"member_count"`
-	}
-	e.must(200, "GET", "/api/v1/circles/"+fam, "alice", nil, &famDetail)
-	if famDetail.MemberCount != 1 {
-		t.Fatalf("custom circle count excludes bob: %d", famDetail.MemberCount)
-	}
-	if e.sees("alice", "bob", "listened") || contains(e.liveUsers("alice"), "bob") {
-		t.Fatal("disabled bob is gone from feed and live")
-	}
-	if code := e.req("GET", "/api/v1/me", "bob", nil, nil); code != 401 {
-		t.Fatalf("disabled bob's session revoked: %d", code)
-	}
-	if !e.userExists("bob") {
-		t.Fatal("data is kept")
-	}
-
-	// bob comes back.
-	e.nav.addUser("bob", false)
-	r, err = e.srv.Syncer.Sync(context.Background())
-	if err != nil || r.Reenabled != 1 {
-		t.Fatalf("sync after re-add: %+v %v", r, err)
-	}
-	if !contains(e.userNames("alice"), "bob") || !e.sees("alice", "bob", "listened") {
-		t.Fatal("re-enabled bob and his history are visible again")
-	}
-	e.must(200, "GET", "/api/v1/circles/"+fam, "alice", nil, &famDetail)
-	if famDetail.MemberCount != 2 {
-		t.Fatal("bob's memberships were kept")
-	}
-
-	// A failing sync changes nothing.
-	e.srv.Syncer.AdminPassword = "wrong"
-	if _, err := e.srv.Syncer.Sync(context.Background()); err == nil {
-		t.Fatal("bad admin credentials must fail")
-	}
-	if e.everyoneCount("alice") != 5 {
-		t.Fatal("a failed sync must not disable anyone")
-	}
 }
 
 func TestExcludedUsers(t *testing.T) {

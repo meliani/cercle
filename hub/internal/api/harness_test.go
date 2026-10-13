@@ -48,30 +48,93 @@ type fakeNavidrome struct {
 	users map[string]fakeUser
 	down  bool
 	calls int
-	// getUsersSawPassword records any getUsers call made with p= (must never happen).
-	getUsersSawPassword bool
-	getUsersCalls       int
+	// Native API state.
+	jwts        map[string]string // token → username
+	jwtSeq      int
+	logins      int
+	listCalls   int
+	listOnly    []string // when set, /api/user lists only these users (prod bug repro)
+	rotateToken bool     // when set, /api/user returns a refreshed token header
 }
 
 type fakeUser struct {
 	password string
 	apiKey   string
 	admin    bool
+	name     string
 }
 
 func newFakeNavidrome() *fakeNavidrome {
-	return &fakeNavidrome{users: map[string]fakeUser{
-		"alice": {password: "pw-alice", apiKey: "key-alice", admin: true},
-		"bob":   {password: "pw-bob", apiKey: "key-bob"},
-		"carol": {password: "pw-carol", apiKey: "key-carol"},
+	return &fakeNavidrome{jwts: map[string]string{}, users: map[string]fakeUser{
+		"alice": {password: "pw-alice", apiKey: "key-alice", admin: true, name: "Alice Liddell"},
+		"bob":   {password: "pw-bob", apiKey: "key-bob", name: "Bob B."},
+		"carol": {password: "pw-carol", apiKey: "key-carol", name: "Carol C."},
 		"dave":  {password: "pw-dave", apiKey: "key-dave"},
 		"admin": {password: "pw-admin", apiKey: "key-admin", admin: true},
 	}}
 }
 
+// expireJWTs invalidates every issued native token (forces a re-login).
+func (f *fakeNavidrome) expireJWTs() {
+	f.mu.Lock()
+	f.jwts = map[string]string{}
+	f.mu.Unlock()
+}
+
+// serveNative implements POST /auth/login and GET /api/user (Navidrome 0.64 shapes).
+func (f *fakeNavidrome) serveNative(w http.ResponseWriter, r *http.Request) {
+	switch {
+	case r.Method == http.MethodPost && r.URL.Path == "/auth/login":
+		var in struct{ Username, Password string }
+		_ = json.NewDecoder(r.Body).Decode(&in)
+		f.logins++
+		u, ok := f.users[in.Username]
+		if !ok || u.password != in.Password {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = io.WriteString(w, `{"error":"Invalid username or password"}`)
+			return
+		}
+		f.jwtSeq++
+		tok := fmt.Sprintf("jwt-%d-%s", f.jwtSeq, in.Username)
+		f.jwts[tok] = in.Username
+		_ = json.NewEncoder(w).Encode(map[string]any{"token": tok, "id": "id-" + in.Username, "name": u.name,
+			"username": in.Username, "isAdmin": u.admin, "subsonicSalt": "abc", "subsonicToken": "secret"})
+	case r.Method == http.MethodGet && r.URL.Path == "/api/user":
+		f.listCalls++
+		h := r.Header.Get("X-ND-Authorization")
+		who, ok := f.jwts[strings.TrimPrefix(h, "Bearer ")]
+		if !ok {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if !f.users[who].admin {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		list := []map[string]any{}
+		for name, u := range f.users {
+			if f.listOnly != nil && !contains(f.listOnly, name) {
+				continue
+			}
+			list = append(list, map[string]any{"id": "id-" + name, "userName": name, "name": u.name, "isAdmin": u.admin,
+				"email": name + "@example.com"})
+		}
+		if f.rotateToken {
+			f.jwtSeq++
+			fresh := fmt.Sprintf("jwt-%d-%s", f.jwtSeq, who)
+			f.jwts[fresh] = who
+			w.Header().Set("X-ND-Authorization", fresh)
+		}
+		w.Header().Set("X-Total-Count", fmt.Sprint(len(list)))
+		_ = json.NewEncoder(w).Encode(list)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
 func (f *fakeNavidrome) addUser(name string, admin bool) {
 	f.mu.Lock()
-	f.users[name] = fakeUser{password: "pw-" + name, apiKey: "key-" + name, admin: admin}
+	f.users[name] = fakeUser{password: "pw-" + name, apiKey: "key-" + name, admin: admin, name: strings.ToUpper(name[:1]) + name[1:]}
 	f.mu.Unlock()
 }
 
@@ -89,13 +152,11 @@ func (f *fakeNavidrome) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "upstream exploded", http.StatusInternalServerError)
 		return
 	}
-	q := r.URL.Query()
-	if r.URL.Path == "/rest/getUsers.view" {
-		f.getUsersCalls++
-		if q.Get("p") != "" {
-			f.getUsersSawPassword = true
-		}
+	if !strings.HasPrefix(r.URL.Path, "/rest/") {
+		f.serveNative(w, r)
+		return
 	}
+	q := r.URL.Query()
 	fail := func() {
 		_, _ = io.WriteString(w, `{"subsonic-response":{"status":"failed","version":"1.16.1","error":{"code":40,"message":"Wrong username or password"}}}`)
 	}
@@ -126,15 +187,8 @@ func (f *fakeNavidrome) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/rest/tokenInfo.view":
 		resp["tokenInfo"] = map[string]string{"username": who}
 	case "/rest/getUsers.view":
-		if !f.users[who].admin {
-			_, _ = io.WriteString(w, `{"subsonic-response":{"status":"failed","error":{"code":50,"message":"not authorized"}}}`)
-			return
-		}
-		list := []map[string]any{}
-		for name, u := range f.users {
-			list = append(list, map[string]any{"username": name, "adminRole": u.admin, "email": name + "@example.com"})
-		}
-		resp["users"] = map[string]any{"user": list}
+		// Navidrome 0.64: only the calling user, whatever their role.
+		resp["users"] = map[string]any{"user": []map[string]any{{"username": who, "adminRole": f.users[who].admin}}}
 	case "/rest/getUser.view":
 		target := q.Get("username")
 		if target != who && !f.users[who].admin {

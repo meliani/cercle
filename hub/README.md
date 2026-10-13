@@ -43,9 +43,10 @@ The contract is [`docs/CONTRACT.md`](../docs/CONTRACT.md) (authoritative, includ
 | `TRUSTED_HEADER` | `` | Optional: header carrying the username set by a trusted reverse proxy |
 | `TRUSTED_PROXIES` | `` | CIDRs/IPs of proxies trusted for `TRUSTED_HEADER` and `X-Forwarded-For` |
 | `CERCLE_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` (JSON logs on stdout) |
-| `NAVIDROME_ADMIN_USER` | `` | Optional Navidrome admin account for user sync (set both or neither) |
-| `NAVIDROME_ADMIN_PASSWORD` | `` | Its password; only a salted token (`t`/`s`) is ever sent, never logged |
+| `NAVIDROME_ADMIN_USER` | `` | Optional Navidrome **admin** account for user sync (set both or neither) |
+| `NAVIDROME_ADMIN_PASSWORD` | `` | Its password; sent only in the body of Navidrome's `POST /auth/login`, never logged |
 | `CERCLE_USER_SYNC_INTERVAL` | `15m` | How often to sync users from Navidrome (≥ `1m`; also once at startup) |
+| `CERCLE_USER_SYNC_ALLOW_MASS_DISABLE` | `false` | Lift the per-run disable limit (see the safety guards below) |
 | `CERCLE_EXCLUDED_USERS` | `` | Comma-separated service accounts (case-insensitive), e.g. `admin` |
 | `CERCLE_EVERYONE_NAME` | `` | If set, applied to the `everyone` circle at startup (default name "Everyone") |
 | `CERCLE_EVERYONE_DESCRIPTION` | `` | If set, applied likewise (default "Everyone on this server") |
@@ -53,11 +54,25 @@ The contract is [`docs/CONTRACT.md`](../docs/CONTRACT.md) (authoritative, includ
 ### Users: sync and exclusions
 
 Without sync, a user appears in Cercle (and in `everyone`) at their first login or first play.
-With `NAVIDROME_ADMIN_USER`/`NAVIDROME_ADMIN_PASSWORD` set, the hub calls Subsonic `getUsers` at
-startup and every `CERCLE_USER_SYNC_INTERVAL`: new Navidrome users are created and join
-`everyone` right away, `is_admin` follows `adminRole`, and users deleted from Navidrome are
+With `NAVIDROME_ADMIN_USER`/`NAVIDROME_ADMIN_PASSWORD` set, the hub lists users through
+Navidrome's native API (`POST /auth/login` → JWT, then `GET /api/user` with
+`X-ND-Authorization`; the JWT is cached and renewed on 401) at startup and every
+`CERCLE_USER_SYNC_INTERVAL`. Subsonic `getUsers` is not used: Navidrome 0.64 returns only the
+calling user there. The account must be a Navidrome admin, otherwise the sync aborts. New
+users are created and join `everyone` right away, named after their Navidrome name (unless they
+changed it in Cercle), `is_admin` follows Navidrome, and users deleted from Navidrome are
 *disabled* — hidden from lists, member counts, live and feed, sessions revoked, data kept — and
-re-enabled if they come back. A dedicated admin account is fine; list it in
+re-enabled if they come back.
+
+Disabling is guarded. If any guard trips, the run still creates and re-enables users but
+disables nobody, and logs a warning:
+
+1. the listing must contain every user active in the last 24 h (hub activity, ingest or login);
+2. at most max(1, 20 % of active users) per run, unless `CERCLE_USER_SYNC_ALLOW_MASS_DISABLE=true`;
+3. a user with a hub session used in the last 24 h is never disabled;
+4. a run never disables every active user (no override).
+
+A failed or empty listing changes nothing. A dedicated admin account is fine; list it in
 `CERCLE_EXCLUDED_USERS` if it should not appear in Cercle.
 
 Excluded users are never created or auto-joined, their plugin events are accepted and dropped,
@@ -65,8 +80,6 @@ and they cannot log in (`403 excluded_user`). Adding an existing user to the lis
 from every circle at the next start (ownership passes to the senior admin, else the senior
 member; a circle they were alone in is deleted).
 
-Subsonic `getUsers` carries no display name, so display names still come from the plugin
-(when it sends `user.name`) or from the user's own edit; until then the username is shown.
 
 ## Run with Docker
 

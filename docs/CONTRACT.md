@@ -36,7 +36,8 @@ Public repos: **no deployment-specific names, hosts, IPs or people in code, docs
   re-join it at any time (`POST /api/v1/circles/everyone/join`, no invite needed). It has no owner;
   only server admins (Navidrome admins, see §3) may rename it. It cannot be deleted.
 - **User sync** (optional, §6): with Navidrome admin credentials configured, the hub mirrors
-  Navidrome's user list (`getUsers`) at startup and periodically, so new users are in
+  Navidrome's user list (native API `POST /auth/login` + `GET /api/user`; Subsonic `getUsers`
+  only returns the caller on Navidrome 0.64) at startup and periodically, so new users are in
   `everyone` before their first login or play. Users deleted from Navidrome are **disabled**:
   invisible everywhere (lists, member counts, live, feed, stats), sessions revoked, data kept;
   they are re-enabled if they reappear (or log in / play again).
@@ -287,7 +288,8 @@ rule** for the calling user:
 | `TZ` | `UTC` | stats bucketing |
 | `TRUSTED_HEADER`, `TRUSTED_PROXIES` | `` | optional reverse-proxy auth |
 | `CERCLE_LOG_LEVEL` | `info` | |
-| `NAVIDROME_ADMIN_USER`, `NAVIDROME_ADMIN_PASSWORD` | `` | optional admin creds enabling user sync (both or neither; token auth only, never logged) |
+| `NAVIDROME_ADMIN_USER`, `NAVIDROME_ADMIN_PASSWORD` | `` | optional Navidrome **admin** creds enabling user sync (both or neither; password only in the native login body, never logged) |
+| `CERCLE_USER_SYNC_ALLOW_MASS_DISABLE` | `false` | lift the per-run disable limit (guard b) |
 | `CERCLE_USER_SYNC_INTERVAL` | `15m` | user sync period (≥ 1m), plus once at startup |
 | `CERCLE_EXCLUDED_USERS` | `` | comma list of service accounts, case-insensitive (e.g. `admin`) |
 | `CERCLE_EVERYONE_NAME`, `CERCLE_EVERYONE_DESCRIPTION` | `` | applied to the `everyone` circle at startup only when set (else an API rename is kept) |
@@ -421,8 +423,14 @@ Gaps the contract left open, as implemented in `hub/` (machine-readable: `docs/o
   `active_memberships` view, so memberships, plays and comments are kept untouched. Any proof of
   existence (login, plugin event, sync) re-enables. A sync that fails or returns an empty list
   changes nothing.
-- Subsonic `getUsers` has no display-name field, so sync only sets `display_name` if a server
-  sends `name`; otherwise names come from the plugin's `user.name` or the user's own edit.
+- The listing comes from Navidrome's native API (JWT cached, one re-login on 401, a refreshed
+  `X-ND-Authorization` header is adopted, a short page per `X-Total-Count` is an error). A
+  non-admin account aborts the sync. `display_name` = Navidrome `name` unless customised.
+- Disable guards: (a) the listing must contain every user active in the last 24 h
+  (`last_seen_at` or a session created in that window); (b) at most max(1, 20 % of active
+  users) per run unless `CERCLE_USER_SYNC_ALLOW_MASS_DISABLE`; (c) users with a session used in
+  the last 24 h (`sessions.last_used_at`, migration 0003) are skipped; (d) never disable every
+  active user (not overridable). A tripped guard skips only the disable step and logs a warning.
 - An excluded user with a valid session or trusted-header identity gets `403 excluded_user` on
   every authenticated endpoint; the Subsonic shim answers them with an empty `nowPlaying`.
 - Purging a newly excluded owner hands the circle to the earliest-joined admin, else member; a
