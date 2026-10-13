@@ -1,0 +1,65 @@
+name: plugin
+
+on:
+  push:
+    branches: [main]
+    paths: ['plugin/**', '.github/workflows/plugin.yml']
+    tags: ['plugin-v*']
+  pull_request:
+    paths: ['plugin/**', '.github/workflows/plugin.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: plugin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: plugin/go.mod
+          cache-dependency-path: plugin/go.sum
+      - name: Check manifest version matches tag
+        if: startsWith(github.ref, 'refs/tags/plugin-v')
+        run: |
+          want="${GITHUB_REF_NAME#plugin-v}"
+          got="$(jq -r .version manifest.json)"
+          if [ "$want" != "$got" ]; then
+            echo "::error::tag $GITHUB_REF_NAME but manifest.json version is $got"
+            exit 1
+          fi
+      - run: make vet
+      - run: make test
+      - run: make package
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cercle-ndp
+          path: plugin/dist/cercle.ndp
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/plugin-v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: cercle-ndp
+      - name: Attach cercle.ndp to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" cercle.ndp --clobber
+          else
+            gh release create "$TAG" cercle.ndp --title "Navidrome plugin ${TAG#plugin-v}" --generate-notes
+          fi

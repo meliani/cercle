@@ -1,0 +1,45 @@
+# Example: Navidrome + Cercle hub + Feishin (with the Cercle section) behind one host name.
+# Put a reverse proxy in front that routes, for https://music.example.com:
+#   /hub/*                      -> cercle-hub:8080   (keep the path; CERCLE_BASE_PATH=/hub)
+#   /rest/getNowPlaying*        -> cercle-hub:8080   (optional: circle-aware "now playing" for apps)
+#   /app/*                      -> feishin:9180      (PUBLIC_PATH=/app/)
+#   everything else             -> navidrome:4533
+services:
+  navidrome:
+    image: deluan/navidrome:0.64.2
+    environment:
+      ND_MUSICFOLDER: /music
+      ND_DATAFOLDER: /data
+    volumes:
+      - ./music:/music:ro
+      - ./navidrome-data:/data          # copy cercle.ndp into ./navidrome-data/plugins/
+
+  cercle-hub:
+    image: ghcr.io/meliani/cercle-hub:latest
+    environment:
+      NAVIDROME_URL: http://navidrome:4533
+      INGEST_SECRET: ${CERCLE_INGEST_SECRET:?set a random string of 32+ chars}
+      CERCLE_BASE_PATH: /hub
+      TZ: Europe/Paris
+    volumes:
+      - ./cercle-data:/data
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/cercle-hub", "healthcheck"]
+      interval: 30s
+
+  feishin:
+    image: ghcr.io/meliani/feishin-cercle:latest
+    environment:
+      PUBLIC_PATH: /app/
+      SERVER_NAME: Music
+      SERVER_TYPE: navidrome
+      SERVER_URL: https://music.example.com
+      SERVER_LOCK: "true"
+      ANALYTICS_DISABLED: "true"
+      CERCLE_HUB_URL: https://music.example.com/hub
+
+# Then, once Navidrome has started with the plugin file in place:
+#   docker compose exec navidrome /app/navidrome plugin rescan
+#   docker compose exec navidrome /app/navidrome plugin edit cercle --all-users \
+#     --config '{"hub_url":"http://cercle-hub:8080/hub","ingest_secret":"<same secret>"}'
+#   docker compose exec navidrome /app/navidrome plugin enable cercle

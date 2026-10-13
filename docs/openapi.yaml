@@ -1,0 +1,1156 @@
+openapi: 3.1.0
+info:
+  title: Cercle hub API
+  version: "1"
+  summary: Social layer for Navidrome — REST API of cercle-hub.
+  description: |
+    Authoritative behaviour is in `docs/CONTRACT.md` (including "Decisions (hub)").
+    All paths are relative to the hub base URL, i.e. `<origin><CERCLE_BASE_PATH>` (e.g.
+    `https://navidrome.example.com/hub`). JSON is snake_case; times are RFC 3339 UTC with
+    millisecond precision (`2026-01-01T12:00:00.000Z`); ids are strings.
+
+    Errors always have the shape `{"error":{"code":"…","message":"…"}}`. Codes used:
+    `bad_request` (400), `code_required` (400), `unauthorized` (401), `forbidden` (403),
+    `not_found` (404), `conflict` / `owner_must_transfer` (409), `invite_invalid` (410),
+    `too_large` (413), `rate_limited` (429), `internal` (500), `bad_gateway` (502).
+
+    Visibility: everything about another user goes through the visibility rule. Items you may
+    not see behave as if they did not exist (404), except where a user is known to you but does
+    not share that category (403).
+
+    WebSocket `GET /api/v1/ws?token=…` is described in CONTRACT.md §5 (not expressible in
+    OpenAPI). Server → client `{"type","data"}` messages: `hello {user: Me}`, `live` (Live),
+    `live_end {username}`, `feed_item` (FeedItem), `reaction {item_id, reactions}`,
+    `comment {item_id, comment}`, `comment_deleted {item_id, comment_id}`,
+    `room_state {room_id, state}`, `room_update` (Room), `room_request {room_id, request}`,
+    `room_request_deleted {room_id, request_id}`, `room_closed {room_id}`, `pong {}`,
+    `error {code, message}`. Client → server: `ping {}`, `subscribe_room {room_id}`
+    (answered with the current `room_state`, or `error` if not a listener),
+    `unsubscribe_room {room_id}`.
+servers:
+  - url: https://navidrome.example.com/hub
+security:
+  - bearer: []
+
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      description: Hub session token from `POST /api/v1/auth/session`.
+    ingestSecret:
+      type: http
+      scheme: bearer
+      description: The shared `INGEST_SECRET`.
+
+  parameters:
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+    Before:
+      name: before
+      in: query
+      description: Opaque cursor from a previous page's `next`.
+      schema: { type: string }
+    Range:
+      name: range
+      in: query
+      description: "`7d`, `30d` (rolling), `year` (current calendar year in hub TZ), `all`, or `YYYY`."
+      schema: { type: string, default: 30d, examples: ["7d", "30d", "year", "all", "2025"] }
+    CircleId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+    RoomId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+    Username:
+      name: username
+      in: path
+      required: true
+      schema: { type: string }
+    ItemId:
+      name: item_id
+      in: path
+      required: true
+      schema: { type: string }
+    Emoji:
+      name: emoji
+      in: path
+      required: true
+      description: One emoji, URL-encoded (e.g. `%F0%9F%94%A5`).
+      schema: { type: string }
+
+  responses:
+    NoContent:
+      description: Done.
+    Error:
+      description: Error.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string }
+            message: { type: string }
+    Timestamp:
+      type: string
+      format: date-time
+      examples: ["2026-01-01T12:00:00.000Z"]
+    User:
+      type: object
+      required: [username, display_name, is_admin, created_at, last_seen_at]
+      properties:
+        username: { type: string }
+        display_name: { type: string }
+        is_admin: { type: boolean, description: Navidrome adminRole at last login. }
+        created_at: { $ref: "#/components/schemas/Timestamp" }
+        last_seen_at:
+          oneOf: [{ $ref: "#/components/schemas/Timestamp" }, { type: "null" }]
+    Hidden:
+      type: object
+      required: [kind, id, label]
+      properties:
+        kind: { type: string, enum: [artist, album, track] }
+        id: { type: string, minLength: 1, maxLength: 256 }
+        label: { type: string, maxLength: 512 }
+    Settings:
+      type: object
+      required: [paused_until, history_delay_minutes, hidden]
+      properties:
+        paused_until:
+          description: Null when not paused (a pause in the past reads as null).
+          oneOf: [{ $ref: "#/components/schemas/Timestamp" }, { type: "null" }]
+        history_delay_minutes: { type: integer, minimum: 0, maximum: 43200 }
+        hidden:
+          type: array
+          items: { $ref: "#/components/schemas/Hidden" }
+    Me:
+      allOf:
+        - $ref: "#/components/schemas/User"
+        - type: object
+          required: [settings]
+          properties:
+            settings: { $ref: "#/components/schemas/Settings" }
+    Role:
+      type: string
+      enum: [owner, admin, member]
+    Circle:
+      type: object
+      required: [id, name, description, kind, member_count, my_role, created_at]
+      properties:
+        id: { type: string, description: "`everyone` for the built-in circle." }
+        name: { type: string }
+        description: { type: string }
+        kind: { type: string, enum: [everyone, custom] }
+        member_count: { type: integer }
+        my_role:
+          description: Null when I'm not a member (only possible for `everyone`, after leaving it).
+          oneOf: [{ $ref: "#/components/schemas/Role" }, { type: "null" }]
+        created_at: { $ref: "#/components/schemas/Timestamp" }
+    Sharing:
+      type: object
+      required: [share_live, share_history, share_stats, share_discoveries]
+      properties:
+        share_live: { type: boolean }
+        share_history: { type: boolean }
+        share_stats: { type: boolean }
+        share_discoveries: { type: boolean }
+    SharingPatch:
+      type: object
+      description: Any subset of the flags.
+      properties:
+        share_live: { type: boolean }
+        share_history: { type: boolean }
+        share_stats: { type: boolean }
+        share_discoveries: { type: boolean }
+    Member:
+      type: object
+      required: [user, role, joined_at]
+      properties:
+        user: { $ref: "#/components/schemas/User" }
+        role: { $ref: "#/components/schemas/Role" }
+        joined_at: { $ref: "#/components/schemas/Timestamp" }
+        sharing:
+          description: Present only for circle owners/admins, and for my own row.
+          $ref: "#/components/schemas/Sharing"
+    CircleDetail:
+      allOf:
+        - $ref: "#/components/schemas/Circle"
+        - type: object
+          required: [members]
+          properties:
+            members:
+              type: array
+              items: { $ref: "#/components/schemas/Member" }
+    Invite:
+      type: object
+      required: [code, circle_id, created_by, expires_at, max_uses, uses, url_path]
+      properties:
+        code: { type: string }
+        circle_id: { type: string }
+        created_by: { type: string, description: Username. }
+        expires_at: { $ref: "#/components/schemas/Timestamp" }
+        max_uses: { type: integer, description: 0 = unlimited. }
+        uses: { type: integer }
+        url_path: { type: string, examples: ["/cercle/join/Ab3dEf6hIj9kLm2n"] }
+    InviteInfo:
+      type: object
+      required: [circle, created_by, valid]
+      properties:
+        circle:
+          type: object
+          required: [id, name, member_count]
+          properties:
+            id: { type: string }
+            name: { type: string }
+            member_count: { type: integer }
+        created_by: { $ref: "#/components/schemas/User" }
+        valid: { type: boolean, description: Not expired and uses left. }
+    Track:
+      type: object
+      required: [id, title, artist, artist_id, album, album_id, duration_ms]
+      properties:
+        id: { type: string, description: Navidrome media file id. }
+        title: { type: string }
+        artist: { type: string }
+        artist_id: { type: string, description: May be empty. }
+        album: { type: string }
+        album_id: { type: string, description: May be empty. }
+        duration_ms: { type: integer }
+    Live:
+      type: object
+      required: [user, track, state, position_ms, started_at, updated_at, player_name]
+      properties:
+        user: { $ref: "#/components/schemas/User" }
+        track: { $ref: "#/components/schemas/Track" }
+        state: { type: string, enum: [playing, paused] }
+        position_ms: { type: integer, description: Position at `updated_at`. }
+        started_at: { $ref: "#/components/schemas/Timestamp" }
+        updated_at: { $ref: "#/components/schemas/Timestamp" }
+        player_name: { type: string }
+    Reaction:
+      type: object
+      required: [emoji, count, mine]
+      properties:
+        emoji: { type: string }
+        count: { type: integer }
+        mine: { type: boolean }
+    FeedItem:
+      type: object
+      required: [id, kind, user, play_count, started_at, ended_at, reactions, comment_count]
+      properties:
+        id: { type: string, description: "listened: first play id; discoveries: `<play id>-artist` / `<play id>-album`." }
+        kind: { type: string, enum: [listened, discovery_artist, discovery_album] }
+        user: { $ref: "#/components/schemas/User" }
+        track:
+          description: listened — the last track of the group; discoveries — the discovering play.
+          $ref: "#/components/schemas/Track"
+        album:
+          description: Present for listened and discovery_album.
+          type: object
+          required: [id, name, artist]
+          properties:
+            id: { type: string }
+            name: { type: string }
+            artist: { type: string }
+        artist:
+          type: object
+          required: [id, name]
+          properties:
+            id: { type: string }
+            name: { type: string }
+        play_count: { type: integer }
+        started_at: { $ref: "#/components/schemas/Timestamp" }
+        ended_at: { $ref: "#/components/schemas/Timestamp" }
+        reactions:
+          type: array
+          items: { $ref: "#/components/schemas/Reaction" }
+        comment_count: { type: integer }
+    Comment:
+      type: object
+      required: [id, user, body, created_at, edited_at]
+      properties:
+        id: { type: string }
+        user: { $ref: "#/components/schemas/User" }
+        body: { type: string, minLength: 1, maxLength: 2000 }
+        created_at: { $ref: "#/components/schemas/Timestamp" }
+        edited_at:
+          oneOf: [{ $ref: "#/components/schemas/Timestamp" }, { type: "null" }]
+    Play:
+      type: object
+      required: [id, track, played_at, player_name]
+      properties:
+        id: { type: string }
+        track: { $ref: "#/components/schemas/Track" }
+        played_at: { $ref: "#/components/schemas/Timestamp" }
+        player_name: { type: string }
+    StatEntry:
+      type: object
+      required: [id, name, plays, ms]
+      properties:
+        id: { type: string, description: "Navidrome id, or `name:<lowercased name>` when the id was unknown." }
+        name: { type: string }
+        artist: { type: string, description: Albums and tracks. }
+        album_id: { type: string, description: Tracks (and albums). }
+        plays: { type: integer }
+        ms: { type: integer }
+    Stats:
+      type: object
+      required: [range, totals, top_artists, top_albums, top_tracks, by_hour, by_weekday, by_day]
+      properties:
+        range: { type: string }
+        totals:
+          type: object
+          required: [plays, ms, active_days, distinct_artists, distinct_albums]
+          properties:
+            plays: { type: integer }
+            ms: { type: integer }
+            active_days: { type: integer }
+            distinct_artists: { type: integer }
+            distinct_albums: { type: integer }
+        top_artists: { type: array, maxItems: 10, items: { $ref: "#/components/schemas/StatEntry" } }
+        top_albums: { type: array, maxItems: 10, items: { $ref: "#/components/schemas/StatEntry" } }
+        top_tracks: { type: array, maxItems: 10, items: { $ref: "#/components/schemas/StatEntry" } }
+        by_hour: { type: array, minItems: 24, maxItems: 24, items: { type: integer } }
+        by_weekday: { type: array, minItems: 7, maxItems: 7, items: { type: integer }, description: "0 = Monday." }
+        by_day:
+          type: array
+          description: Every day of the range up to today (only days with plays for `all`).
+          items:
+            type: object
+            required: [date, plays]
+            properties:
+              date: { type: string, format: date }
+              plays: { type: integer }
+    CircleStats:
+      allOf:
+        - $ref: "#/components/schemas/Stats"
+        - type: object
+          required: [members]
+          properties:
+            members:
+              type: array
+              items:
+                type: object
+                required: [user, plays, ms]
+                properties:
+                  user: { $ref: "#/components/schemas/User" }
+                  plays: { type: integer }
+                  ms: { type: integer }
+    Compare:
+      type: object
+      required: [common_artists, common_albums, score]
+      properties:
+        common_artists: { type: array, maxItems: 25, items: { $ref: "#/components/schemas/StatEntry" }, description: plays/ms are the sum of both users. }
+        common_albums: { type: array, maxItems: 25, items: { $ref: "#/components/schemas/StatEntry" } }
+        score: { type: number, minimum: 0, maximum: 1, description: Jaccard index over artists. }
+    Wrapped:
+      allOf:
+        - $ref: "#/components/schemas/Stats"
+        - type: object
+          required: [first_play, top_month, longest_day, new_artists]
+          properties:
+            first_play:
+              oneOf:
+                - type: "null"
+                - type: object
+                  required: [track, played_at]
+                  properties:
+                    track: { $ref: "#/components/schemas/Track" }
+                    played_at: { $ref: "#/components/schemas/Timestamp" }
+            top_month:
+              oneOf: [{ type: string, examples: ["2026-03"] }, { type: "null" }]
+            longest_day:
+              oneOf:
+                - type: "null"
+                - type: object
+                  required: [date, ms]
+                  properties:
+                    date: { type: string, format: date }
+                    ms: { type: integer }
+            new_artists: { type: integer, description: Artists first played (ever) in that year. }
+    RoomState:
+      type: object
+      required: [track_id, position_ms, playing, queue, updated_at, seq]
+      properties:
+        track_id: { oneOf: [{ type: string }, { type: "null" }] }
+        position_ms: { type: integer }
+        playing: { type: boolean }
+        queue: { type: array, items: { type: string }, description: Track ids. }
+        updated_at: { $ref: "#/components/schemas/Timestamp" }
+        seq: { type: integer, description: Increments on every state change. }
+    RoomStateInput:
+      type: object
+      properties:
+        track_id: { oneOf: [{ type: string }, { type: "null" }] }
+        position_ms: { type: integer, minimum: 0 }
+        playing: { type: boolean }
+        queue: { type: array, maxItems: 1000, items: { type: string } }
+    Room:
+      type: object
+      required: [id, circle_id, name, host, listeners, state, created_at]
+      properties:
+        id: { type: string }
+        circle_id: { type: string }
+        name: { type: string }
+        host: { $ref: "#/components/schemas/User" }
+        listeners: { type: array, items: { $ref: "#/components/schemas/User" } }
+        state: { $ref: "#/components/schemas/RoomState" }
+        created_at: { $ref: "#/components/schemas/Timestamp" }
+    RoomRequest:
+      type: object
+      required: [id, user, track, created_at]
+      properties:
+        id: { type: string }
+        user: { $ref: "#/components/schemas/User" }
+        track: { $ref: "#/components/schemas/Track" }
+        created_at: { $ref: "#/components/schemas/Timestamp" }
+    RoomDetail:
+      allOf:
+        - $ref: "#/components/schemas/Room"
+        - type: object
+          required: [requests]
+          properties:
+            requests: { type: array, items: { $ref: "#/components/schemas/RoomRequest" } }
+    IngestEvent:
+      type: object
+      required: [type, user]
+      description: Unknown fields are ignored; unknown `type`s are counted but ignored.
+      properties:
+        type: { type: string, enum: [now_playing, scrobble, playback_state] }
+        user:
+          type: object
+          required: [username]
+          properties:
+            username: { type: string }
+            name: { type: string }
+            id: { type: string }
+        track:
+          type: object
+          required: [id]
+          properties:
+            id: { type: string }
+            title: { type: string }
+            artist: { type: string }
+            artist_id: { type: string }
+            album: { type: string }
+            album_id: { type: string }
+            album_artist: { type: string }
+            duration_ms: { type: integer }
+            track_number: { type: integer }
+            year: { type: integer }
+            genre: { type: string }
+            mbz_track_id: { type: string }
+            mbz_album_id: { type: string }
+            mbz_artist_id: { type: string }
+        player:
+          type: object
+          properties:
+            id: { type: string }
+            name: { type: string }
+        timestamp: { type: string, format: date-time }
+        position_ms: { type: integer }
+        state: { type: string, enum: [starting, playing, paused, stopped, expired] }
+
+paths:
+  /health:
+    get:
+      summary: Liveness/readiness
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, version]
+                properties:
+                  ok: { type: boolean }
+                  version: { type: string }
+        "503": { description: Database unavailable. }
+
+  /ingest/v1/events:
+    post:
+      summary: Ingest plugin events (one event or a batch of ≤ 100)
+      security: [{ ingestSecret: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - $ref: "#/components/schemas/IngestEvent"
+                - type: object
+                  required: [events]
+                  properties:
+                    events: { type: array, maxItems: 100, items: { $ref: "#/components/schemas/IngestEvent" } }
+      responses:
+        "202":
+          description: Accepted.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [accepted]
+                properties:
+                  accepted: { type: integer }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+
+  /api/v1/auth/session:
+    post:
+      summary: Log in with Subsonic credentials (validated against Navidrome)
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username]
+              description: username plus exactly one of token+salt, password, api_key.
+              properties:
+                username: { type: string }
+                token: { type: string, description: "Subsonic `t` (md5(password + salt))." }
+                salt: { type: string, description: "Subsonic `s`." }
+                password: { type: string }
+                api_key: { type: string }
+      responses:
+        "200":
+          description: Session created (valid 30 days, sliding).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [token, user]
+                properties:
+                  token: { type: string, description: Opaque 32-byte base64url. }
+                  user: { $ref: "#/components/schemas/User" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "502": { $ref: "#/components/responses/Error" }
+    delete:
+      summary: Log out (revoke this token)
+      responses:
+        "204": { $ref: "#/components/responses/NoContent" }
+        "401": { $ref: "#/components/responses/Error" }
+
+  /api/v1/me:
+    get:
+      summary: Me and my privacy settings
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Me" } } } }
+    patch:
+      summary: Change my display name
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                display_name: { type: string, minLength: 1, maxLength: 64 }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Me" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+  /api/v1/me/settings:
+    put:
+      summary: Update privacy settings (partial)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                paused_until: { oneOf: [{ $ref: "#/components/schemas/Timestamp" }, { type: "null" }] }
+                history_delay_minutes: { type: integer, minimum: 0, maximum: 43200 }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Settings" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+  /api/v1/me/pause:
+    post:
+      summary: Pause sharing for N minutes (0 = resume)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [minutes]
+              properties:
+                minutes: { type: integer, minimum: 0, maximum: 525600 }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Settings" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+  /api/v1/me/hidden:
+    post:
+      summary: Hide an artist/album/track from Cercle (past and future)
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/Hidden" } } }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Settings" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+  /api/v1/me/hidden/{kind}/{id}:
+    delete:
+      summary: Unhide (idempotent)
+      parameters:
+        - { name: kind, in: path, required: true, schema: { type: string, enum: [artist, album, track] } }
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Settings" } } } }
+
+  /api/v1/users:
+    get:
+      summary: Users sharing at least one circle with me (excluding me)
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/User" } }
+  /api/v1/users/{username}:
+    get:
+      summary: A user I share a circle with (or me)
+      parameters: [{ $ref: "#/components/parameters/Username" }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/User"
+                  - type: object
+                    required: [common_circles]
+                    properties:
+                      common_circles: { type: array, items: { $ref: "#/components/schemas/Circle" } }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/v1/users/{username}/plays:
+    get:
+      summary: Individual plays (needs share_history via a common circle)
+      parameters:
+        - $ref: "#/components/parameters/Username"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Before"
+      responses:
+        "200":
+          description: Newest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, next]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/Play" } }
+                  next: { oneOf: [{ type: string }, { type: "null" }] }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /api/v1/circles:
+    get:
+      summary: My circles (`everyone` always listed first)
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/Circle" } }
+    post:
+      summary: Create a circle (I become owner)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, minLength: 1, maxLength: 100 }
+                description: { type: string, maxLength: 1000 }
+      responses:
+        "201": { description: Created, content: { application/json: { schema: { $ref: "#/components/schemas/Circle" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+  /api/v1/circles/{id}:
+    parameters: [{ $ref: "#/components/parameters/CircleId" }]
+    get:
+      summary: Circle with members (members only)
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/CircleDetail" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    patch:
+      summary: Rename/describe (owner/admin; `everyone` — server admins only)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string, minLength: 1, maxLength: 100 }
+                description: { type: string, maxLength: 1000 }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Circle" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      summary: Delete (owner; not `everyone`)
+      responses:
+        "204": { $ref: "#/components/responses/NoContent" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/v1/circles/{id}/join:
+    parameters: [{ $ref: "#/components/parameters/CircleId" }]
+    post:
+      summary: Join (code required except for `everyone`; idempotent)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                code: { type: string }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Circle" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "410": { $ref: "#/components/responses/Error" }
+  /api/v1/circles/{id}/leave:
+    parameters: [{ $ref: "#/components/parameters/CircleId" }]
+    post:
+      summary: Leave (owner must transfer first unless last member → circle deleted; idempotent)
+      responses:
+        "204": { $ref: "#/components/responses/NoContent" }
+        "409": { $ref: "#/components/responses/Error" }
+  /api/v1/circles/{id}/sharing:
+    parameters: [{ $ref: "#/components/parameters/CircleId" }]
+    put:
+      summary: My sharing flags in this circle (partial)
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/SharingPatch" } } }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Sharing" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/v1/circles/{id}/members/{username}:
+    parameters:
+      - $ref: "#/components/parameters/CircleId"
+      - $ref: "#/components/parameters/Username"
+    put:
+      summary: Change a member's role (owner only; `owner` transfers ownership, previous owner becomes admin)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role]
+              properties:
+                role: { $ref: "#/components/schemas/Role" }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Member" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      summary: "Remove a member (owner — anyone but self; admin — members only)"
+      responses:
+        "204": { $ref: "#/components/responses/NoContent" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/v1/circles/{id}/invites:
+    parameters: [{ $ref: "#/components/parameters/CircleId" }]
+    post:
+      summary: Create an invite (owner/admin)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                expires_in_hours: { type: integer, minimum: 1, maximum: 8760, default: 168 }
+                max_uses: { type: integer, minimum: 0, default: 0, description: 0 = unlimited. }
+      responses:
+        "201": { description: Created, content: { application/json: { schema: { $ref: "#/components/schemas/Invite" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+    get:
+      summary: List invites (owner/admin)
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/Invite" } }
+        "403": { $ref: "#/components/responses/Error" }
+  /api/v1/circles/{id}/invites/{code}:
+    parameters:
+      - $ref: "#/components/parameters/CircleId"
+      - { name: code, in: path, required: true, schema: { type: string } }
+    delete:
+      summary: Revoke an invite (owner/admin)
+      responses:
+        "204": { $ref: "#/components/responses/NoContent" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/v1/invites/{code}:
+    parameters: [{ name: code, in: path, required: true, schema: { type: string } }]
+    get:
+      summary: Invite info for the join screen
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/InviteInfo" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/v1/invites/{code}/accept:
+    parameters: [{ name: code, in: path, required: true, schema: { type: string } }]
+    post:
+      summary: Accept an invite (idempotent for members; no use consumed)
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Circle" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+        "410": { $ref: "#/components/responses/Error" }
+
+  /api/v1/live:
+    get:
+      summary: Everyone I may see playing now, including me
+      responses:
+        "200":
+          description: Most recently updated first.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/Live" } }
+  /api/v1/feed:
+    get:
+      summary: Feed (newest first)
+      parameters:
+        - { name: circle, in: query, schema: { type: string }, description: Only visibility granted through this circle (must be a member). }
+        - { name: user, in: query, schema: { type: string }, description: Only this user's items. }
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Before"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, next]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/FeedItem" } }
+                  next: { oneOf: [{ type: string }, { type: "null" }] }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/v1/feed/{item_id}/comments:
+    parameters: [{ $ref: "#/components/parameters/ItemId" }]
+    get:
+      summary: Comments, oldest first
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/Comment" } }
+        "404": { $ref: "#/components/responses/Error" }
+    post:
+      summary: Comment on an item I can see
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [body]
+              properties:
+                body: { type: string, minLength: 1, maxLength: 2000, description: Trimmed. }
+      responses:
+        "201": { description: Created, content: { application/json: { schema: { $ref: "#/components/schemas/Comment" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/v1/comments/{id}:
+    parameters: [{ name: id, in: path, required: true, schema: { type: string } }]
+    patch:
+      summary: Edit my comment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [body]
+              properties:
+                body: { type: string, minLength: 1, maxLength: 2000 }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Comment" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      summary: Delete (author, or owner/admin of a circle that makes the item visible)
+      responses:
+        "204": { $ref: "#/components/responses/NoContent" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/v1/feed/{item_id}/reactions/{emoji}:
+    parameters:
+      - $ref: "#/components/parameters/ItemId"
+      - $ref: "#/components/parameters/Emoji"
+    put:
+      summary: React (idempotent)
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/FeedItem" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      summary: Remove my reaction (idempotent)
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/FeedItem" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /api/v1/stats/me:
+    get:
+      summary: My stats (includes my private plays)
+      parameters: [{ $ref: "#/components/parameters/Range" }]
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Stats" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+  /api/v1/stats/users/{username}:
+    get:
+      summary: A user's stats (needs share_stats via a common circle)
+      parameters:
+        - $ref: "#/components/parameters/Username"
+        - $ref: "#/components/parameters/Range"
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Stats" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/v1/stats/circles/{id}:
+    get:
+      summary: Circle-wide stats over members sharing stats in this circle (members only)
+      parameters:
+        - $ref: "#/components/parameters/CircleId"
+        - $ref: "#/components/parameters/Range"
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/CircleStats" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/v1/stats/compare/{username}:
+    get:
+      summary: Compare my taste with a user's
+      parameters:
+        - $ref: "#/components/parameters/Username"
+        - $ref: "#/components/parameters/Range"
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Compare" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/v1/wrapped/{year}:
+    get:
+      summary: Yearly recap (me, or ?user= with share_stats)
+      parameters:
+        - { name: year, in: path, required: true, schema: { type: integer, minimum: 1970, maximum: 9999 } }
+        - { name: user, in: query, schema: { type: string } }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Wrapped" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /api/v1/circles/{id}/rooms:
+    parameters: [{ $ref: "#/components/parameters/CircleId" }]
+    get:
+      summary: Rooms of a circle (members only)
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/Room" } }
+        "404": { $ref: "#/components/responses/Error" }
+    post:
+      summary: Create a room (any member; creator hosts and listens)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, minLength: 1, maxLength: 100 }
+      responses:
+        "201": { description: Created, content: { application/json: { schema: { $ref: "#/components/schemas/Room" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/v1/rooms/{id}:
+    parameters: [{ $ref: "#/components/parameters/RoomId" }]
+    get:
+      summary: Room with pending requests (circle members)
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/RoomDetail" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      summary: Close the room (host, or circle owner/admin)
+      responses:
+        "204": { $ref: "#/components/responses/NoContent" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/v1/rooms/{id}/join:
+    parameters: [{ $ref: "#/components/parameters/RoomId" }]
+    post:
+      summary: Join as listener (circle members; idempotent)
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Room" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/v1/rooms/{id}/leave:
+    parameters: [{ $ref: "#/components/parameters/RoomId" }]
+    post:
+      summary: Leave (host → longest-present listener; empty → closed)
+      responses:
+        "204": { $ref: "#/components/responses/NoContent" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/v1/rooms/{id}/state:
+    parameters: [{ $ref: "#/components/parameters/RoomId" }]
+    put:
+      summary: Replace the playback state (host only); bumps seq, sets updated_at
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/RoomStateInput" } } }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/RoomState" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/v1/rooms/{id}/host:
+    parameters: [{ $ref: "#/components/parameters/RoomId" }]
+    put:
+      summary: Hand hosting to a listener (host only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username]
+              properties:
+                username: { type: string }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Room" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+  /api/v1/rooms/{id}/requests:
+    parameters: [{ $ref: "#/components/parameters/RoomId" }]
+    post:
+      summary: Request a track (listeners)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [track]
+              properties:
+                track: { $ref: "#/components/schemas/Track" }
+      responses:
+        "201": { description: Created, content: { application/json: { schema: { $ref: "#/components/schemas/RoomRequest" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /api/v1/rooms/{id}/requests/{rid}:
+    parameters:
+      - $ref: "#/components/parameters/RoomId"
+      - { name: rid, in: path, required: true, schema: { type: string } }
+    delete:
+      summary: Remove a request (host, or requester)
+      responses:
+        "204": { $ref: "#/components/responses/NoContent" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /rest/getNowPlaying.view:
+    get:
+      summary: Visibility-filtered Subsonic getNowPlaying (also at /rest/getNowPlaying, and at the server root)
+      description: |
+        Standard Subsonic auth parameters (`u`+`t`+`s`, `u`+`p`, or `apiKey`), validated against
+        Navidrome and cached 10 minutes. Always HTTP 200; bad credentials → Subsonic error 40.
+        `f=json` (or `jsonp`, treated as json) returns JSON, anything else XML
+        (`xmlns="http://subsonic.org/restapi"`). Entry attributes: id, parent, isDir, title,
+        album, artist, albumId, artistId, duration (s), coverArt (= track id), type, username,
+        minutesAgo, playerId (1..n), playerName, state, positionMs.
+      security: []
+      parameters:
+        - { name: u, in: query, schema: { type: string } }
+        - { name: t, in: query, schema: { type: string } }
+        - { name: s, in: query, schema: { type: string } }
+        - { name: p, in: query, schema: { type: string } }
+        - { name: apiKey, in: query, schema: { type: string } }
+        - { name: f, in: query, schema: { type: string, enum: [xml, json, jsonp] } }
+        - { name: v, in: query, schema: { type: string } }
+        - { name: c, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: Subsonic envelope.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  subsonic-response:
+                    type: object
+                    required: [status, version, type, serverVersion, openSubsonic]
+                    properties:
+                      status: { type: string, enum: [ok, failed] }
+                      version: { type: string, const: "1.16.1" }
+                      type: { type: string, const: cercle }
+                      serverVersion: { type: string }
+                      openSubsonic: { type: boolean }
+                      error:
+                        type: object
+                        properties:
+                          code: { type: integer }
+                          message: { type: string }
+                      nowPlaying:
+                        type: object
+                        properties:
+                          entry: { type: array, items: { type: object } }
+            application/xml: {}
+    post:
+      summary: Same as GET with form-encoded parameters
+      security: []
+      responses:
+        "200": { description: Subsonic envelope. }

@@ -1,0 +1,57 @@
+{
+  "name": "Cercle",
+  "author": "Cercle contributors",
+  "version": "0.1.0",
+  "description": "Shares your listening with your Cercle circles (self-hosted social hub)",
+  "website": "https://github.com/meliani/cercle",
+  "config": {
+    "schema": {
+      "type": "object",
+      "properties": {
+        "hub_url": {
+          "type": "string",
+          "title": "Hub URL",
+          "description": "Base URL of your Cercle hub as reachable from Navidrome, e.g. http://cercle-hub:8080/hub. Events are posted to <hub_url>/ingest/v1/events.",
+          "pattern": "^https?://.+",
+          "minLength": 8
+        },
+        "ingest_secret": {
+          "type": "string",
+          "title": "Ingest secret",
+          "description": "The hub's INGEST_SECRET (at least 32 characters).",
+          "minLength": 32
+        }
+      },
+      "required": ["hub_url", "ingest_secret"]
+    },
+    "uiSchema": {
+      "type": "VerticalLayout",
+      "elements": [
+        {
+          "type": "Control",
+          "scope": "#/properties/hub_url"
+        },
+        {
+          "type": "Control",
+          "scope": "#/properties/ingest_secret",
+          "options": { "format": "password" }
+        }
+      ]
+    }
+  },
+  "permissions": {
+    "users": {
+      "reason": "Receive scrobble events for the users assigned to this plugin and show their display name in Cercle"
+    },
+    "http": {
+      "reason": "Send listening events to your Cercle hub (usually on a private network, so any host is allowed)",
+      "requiredHosts": ["*"]
+    },
+    "subsonicapi": {
+      "reason": "Look up album id, artist id, year and genre of the playing track (getSong), which Navidrome does not pass to scrobblers"
+    },
+    "cache": {
+      "reason": "Cache per-track metadata and user display names to avoid repeated lookups"
+    }
+  }
+}
