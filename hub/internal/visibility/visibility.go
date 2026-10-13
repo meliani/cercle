@@ -10,7 +10,9 @@
 //	  - for live: S is not paused.
 //
 // Membership is evaluated at query time, so leaving a circle immediately
-// removes visibility through it, including the past.
+// removes visibility through it, including the past. Memberships are read
+// through the active_memberships view, so users disabled by the Navidrome
+// sync (deleted there) are invisible to everyone else.
 package visibility
 
 import (
@@ -66,7 +68,7 @@ func (v *V) SharesWith(ctx context.Context, viewer, subject string, c Category, 
 	if viewer == subject {
 		return true, nil
 	}
-	q := `SELECT 1 FROM memberships a JOIN memberships b ON b.circle_id = a.circle_id
+	q := `SELECT 1 FROM active_memberships a JOIN active_memberships b ON b.circle_id = a.circle_id
 		WHERE a.username = ? AND b.username = ? AND b.` + c.Column() + ` = 1`
 	args := []any{viewer, subject}
 	if circleID != "" {
@@ -88,7 +90,7 @@ func (v *V) CommonCircle(ctx context.Context, viewer, subject string) (bool, err
 		return true, nil
 	}
 	var one int
-	err := v.Q.QueryRowContext(ctx, `SELECT 1 FROM memberships a JOIN memberships b ON b.circle_id = a.circle_id
+	err := v.Q.QueryRowContext(ctx, `SELECT 1 FROM active_memberships a JOIN active_memberships b ON b.circle_id = a.circle_id
 		WHERE a.username = ? AND b.username = ? LIMIT 1`, viewer, subject).Scan(&one)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
@@ -100,8 +102,8 @@ func (v *V) CommonCircle(ctx context.Context, viewer, subject string) (bool, err
 // membership level, including subject.
 func (v *V) Audience(ctx context.Context, subject string, c Category) (map[string]bool, error) {
 	out := map[string]bool{subject: true}
-	rows, err := v.Q.QueryContext(ctx, `SELECT DISTINCT a.username FROM memberships a
-		JOIN memberships b ON b.circle_id = a.circle_id
+	rows, err := v.Q.QueryContext(ctx, `SELECT DISTINCT a.username FROM active_memberships a
+		JOIN active_memberships b ON b.circle_id = a.circle_id
 		WHERE b.username = ? AND b.`+c.Column()+` = 1`, subject)
 	if err != nil {
 		return nil, err
@@ -121,8 +123,8 @@ func (v *V) Audience(ctx context.Context, subject string, c Category) (map[strin
 // (regardless of flags), including subject.
 func (v *V) Mates(ctx context.Context, subject string) (map[string]bool, error) {
 	out := map[string]bool{subject: true}
-	rows, err := v.Q.QueryContext(ctx, `SELECT DISTINCT a.username FROM memberships a
-		JOIN memberships b ON b.circle_id = a.circle_id WHERE b.username = ?`, subject)
+	rows, err := v.Q.QueryContext(ctx, `SELECT DISTINCT a.username FROM active_memberships a
+		JOIN active_memberships b ON b.circle_id = a.circle_id WHERE b.username = ?`, subject)
 	if err != nil {
 		return nil, err
 	}
@@ -140,7 +142,7 @@ func (v *V) Mates(ctx context.Context, subject string) (map[string]bool, error) 
 // Subjects returns every user whose category c viewer may see (membership
 // level), including viewer. If circleID is set, only through that circle.
 func (v *V) Subjects(ctx context.Context, viewer string, c Category, circleID string) ([]string, error) {
-	q := `SELECT DISTINCT b.username FROM memberships a JOIN memberships b ON b.circle_id = a.circle_id
+	q := `SELECT DISTINCT b.username FROM active_memberships a JOIN active_memberships b ON b.circle_id = a.circle_id
 		WHERE a.username = ? AND b.` + c.Column() + ` = 1`
 	args := []any{viewer}
 	if circleID != "" {
@@ -199,7 +201,7 @@ func (v *V) FeedCond(viewerSQL string, viewerArgs []any, circleID string) (strin
 	cond := `(f.user_id = ` + viewerSQL + ` OR (
 		f.private = 0
 		AND f.last_played_at <= ? - 60000 * (SELECT u.history_delay_minutes FROM users u WHERE u.username = f.user_id)
-		AND EXISTS (SELECT 1 FROM memberships a JOIN memberships b ON b.circle_id = a.circle_id
+		AND EXISTS (SELECT 1 FROM active_memberships a JOIN active_memberships b ON b.circle_id = a.circle_id
 			WHERE a.username = ` + viewerSQL + ` AND b.username = f.user_id` + circleSQL + `
 			AND ((f.kind = 'listened' AND b.share_history = 1) OR (f.kind <> 'listened' AND b.share_discoveries = 1)))
 		AND NOT EXISTS (SELECT 1 FROM plays fp WHERE (fp.feed_item_id = f.id OR fp.id = f.last_play_id) AND ` + hiddenMatch("fp") + `)
@@ -245,7 +247,7 @@ func (v *V) CanModerateFeedItem(ctx context.Context, viewer, itemID string) (boo
 	cond, args := v.FeedCond("?", []any{viewer}, "")
 	var one int
 	err := v.Q.QueryRowContext(ctx, `SELECT 1 FROM feed_items f WHERE f.id = ? AND `+cond+`
-		AND EXISTS (SELECT 1 FROM memberships a JOIN memberships b ON b.circle_id = a.circle_id
+		AND EXISTS (SELECT 1 FROM active_memberships a JOIN active_memberships b ON b.circle_id = a.circle_id
 			WHERE a.username = ? AND a.role IN ('owner','admin') AND b.username = f.user_id
 			AND ((f.kind = 'listened' AND b.share_history = 1) OR (f.kind <> 'listened' AND b.share_discoveries = 1)))`,
 		append(append([]any{itemID}, args...), viewer)...).Scan(&one)
@@ -256,17 +258,17 @@ func (v *V) CanModerateFeedItem(ctx context.Context, viewer, itemID string) (boo
 }
 
 // LiveGate is the item-level half of the rule for a live track: subject not
-// paused and track not matching a hidden item. It does not check membership.
+// paused (nor disabled) and track not matching a hidden item. It does not check membership.
 func (v *V) LiveGate(ctx context.Context, subject string, t model.Track) (bool, error) {
-	var paused sql.NullInt64
-	err := v.Q.QueryRowContext(ctx, `SELECT paused_until FROM users WHERE username = ?`, subject).Scan(&paused)
+	var paused, disabled sql.NullInt64
+	err := v.Q.QueryRowContext(ctx, `SELECT paused_until, disabled_at FROM users WHERE username = ?`, subject).Scan(&paused, &disabled)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
 		return false, err
 	}
-	if paused.Valid && paused.Int64 > v.now() {
+	if disabled.Valid || (paused.Valid && paused.Int64 > v.now()) {
 		return false, nil
 	}
 	hidden, err := HiddenMatch(ctx, v.Q, subject, t.ID, t.AlbumID, t.ArtistID)

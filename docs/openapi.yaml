@@ -11,7 +11,8 @@ info:
 
     Errors always have the shape `{"error":{"code":"…","message":"…"}}`. Codes used:
     `bad_request` (400), `code_required` (400), `unauthorized` (401), `forbidden` (403),
-    `not_found` (404), `conflict` / `owner_must_transfer` (409), `invite_invalid` (410),
+    `excluded_user` (403 — the account is listed in `CERCLE_EXCLUDED_USERS`; returned by
+    `POST /api/v1/auth/session` and by any authenticated endpoint), `not_found` (404), `conflict` / `owner_must_transfer` (409), `invite_invalid` (410),
     `too_large` (413), `rate_limited` (429), `internal` (500), `bad_gateway` (502).
 
     Visibility: everything about another user goes through the visibility rule. Items you may
@@ -542,6 +543,11 @@ paths:
                   user: { $ref: "#/components/schemas/User" }
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Error" }
+        "403":
+          description: "`excluded_user` — valid Navidrome credentials, but the account is excluded from Cercle."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "429": { $ref: "#/components/responses/Error" }
         "502": { $ref: "#/components/responses/Error" }
     delete:

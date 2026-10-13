@@ -15,10 +15,16 @@ import (
 // Columns selected by Scan, in order.
 const Cols = "username, display_name, is_admin, created_at, last_seen_at"
 
+// ErrExcluded is returned by Ensure for excluded service accounts.
+var ErrExcluded = errors.New("excluded user")
+
 // Service reads and writes users.
 type Service struct {
 	DB  *db.DB
 	Now func() time.Time
+	// Excluded reports whether a username is an excluded service account
+	// (CERCLE_EXCLUDED_USERS). Nil means nobody is excluded.
+	Excluded func(username string) bool
 
 	mu   sync.Mutex
 	seen map[string]time.Time
@@ -35,10 +41,21 @@ type EnsureOpts struct {
 	IsAdmin     *bool
 }
 
+// IsExcluded reports whether username is an excluded service account.
+func (s *Service) IsExcluded(username string) bool {
+	return s.Excluded != nil && s.Excluded(username)
+}
+
 // Ensure creates the user if missing — joining them to the `everyone` circle,
-// which is how "visible from the start" works — and refreshes metadata.
+// which is how "visible from the start" works — and refreshes metadata. A
+// disabled user (deleted from Navidrome at the last sync) is re-enabled:
+// whoever calls Ensure has just proven the account exists. Excluded service
+// accounts are refused with ErrExcluded and never created.
 // It must be called with the caller's write transaction.
 func (s *Service) Ensure(ctx context.Context, q db.Querier, username string, o EnsureOpts) (created bool, err error) {
+	if s.IsExcluded(username) {
+		return false, ErrExcluded
+	}
 	now := s.Now().UnixMilli()
 	display := o.Name
 	if display == "" {
@@ -59,6 +76,9 @@ func (s *Service) Ensure(ctx context.Context, q db.Querier, username string, o E
 			return false, err
 		}
 		return true, nil
+	}
+	if _, err := q.ExecContext(ctx, `UPDATE users SET disabled_at = NULL WHERE username = ? AND disabled_at IS NOT NULL`, username); err != nil {
+		return false, err
 	}
 	if o.Name != "" {
 		if _, err := q.ExecContext(ctx, `UPDATE users SET display_name = ?

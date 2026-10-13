@@ -50,7 +50,7 @@ func randomID(n int) string {
 }
 
 const circleCols = `c.id, c.name, c.description, c.kind, c.created_at,
-	(SELECT COUNT(*) FROM memberships m WHERE m.circle_id = c.id),
+	(SELECT COUNT(*) FROM active_memberships m WHERE m.circle_id = c.id),
 	(SELECT m.role FROM memberships m WHERE m.circle_id = c.id AND m.username = ?)`
 
 func scanCircle(sc users.Scanner) (model.Circle, error) {
@@ -207,7 +207,7 @@ func (s *Server) getCircle(w http.ResponseWriter, r *http.Request, me string) {
 		return
 	}
 	rows, err := s.DB.R.QueryContext(r.Context(), `SELECT username, role, joined_at, share_live, share_history, share_stats, share_discoveries
-		FROM memberships WHERE circle_id = ? ORDER BY CASE role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END, joined_at, username`, c.ID)
+		FROM active_memberships WHERE circle_id = ? ORDER BY CASE role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END, joined_at, username`, c.ID)
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -753,7 +753,7 @@ func (s *Server) getInvite(w http.ResponseWriter, r *http.Request, me string) {
 	var exp int64
 	var maxUses, uses, count int
 	err := s.DB.R.QueryRowContext(r.Context(), `SELECT i.circle_id, c.name, i.created_by, i.expires_at, i.max_uses, i.uses,
-		(SELECT COUNT(*) FROM memberships m WHERE m.circle_id = c.id)
+		(SELECT COUNT(*) FROM active_memberships m WHERE m.circle_id = c.id)
 		FROM invites i JOIN circles c ON c.id = i.circle_id WHERE i.code = ?`, r.PathValue("code")).
 		Scan(&circleID, &name, &by, &exp, &maxUses, &uses, &count)
 	if err != nil {

@@ -4,6 +4,9 @@ package auth
 
 import (
 	"context"
+	"crypto/md5"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -103,6 +106,13 @@ type subsonicEnvelope struct {
 		TokenInfo *struct {
 			Username string `json:"username"`
 		} `json:"tokenInfo"`
+		Users *struct {
+			User []struct {
+				Username  string `json:"username"`
+				Name      string `json:"name"`
+				AdminRole bool   `json:"adminRole"`
+			} `json:"user"`
+		} `json:"users"`
 	} `json:"subsonic-response"`
 }
 
@@ -186,4 +196,47 @@ func (n *HTTPNavidrome) Validate(ctx context.Context, c Creds) (Identity, error)
 		return Identity{}, err
 	}
 	return id, nil
+}
+
+// TokenCreds builds Subsonic token credentials (t = md5(password + salt))
+// with a fresh random salt, so the password itself never travels.
+func TokenCreds(username, password string) Creds {
+	b := make([]byte, 12)
+	_, _ = rand.Read(b)
+	salt := hex.EncodeToString(b)
+	sum := md5.Sum([]byte(password + salt))
+	return Creds{Username: username, Token: hex.EncodeToString(sum[:]), Salt: salt}
+}
+
+// NavUser is one entry of getUsers.
+type NavUser struct {
+	Username string
+	Name     string // not part of the Subsonic User type; used if a server sends it
+	IsAdmin  bool
+}
+
+// UserLister lists every Navidrome user (admin credentials required).
+type UserLister interface {
+	ListUsers(ctx context.Context, admin Creds) ([]NavUser, error)
+}
+
+// ListUsers calls getUsers.view.
+func (n *HTTPNavidrome) ListUsers(ctx context.Context, admin Creds) ([]NavUser, error) {
+	if !admin.Valid() {
+		return nil, ErrBadCredentials
+	}
+	env, err := n.call(ctx, "getUsers", admin.params())
+	if err != nil {
+		return nil, err
+	}
+	if env.Resp.Users == nil {
+		return nil, fmt.Errorf("%w: getUsers returned no users element", ErrUnavailable)
+	}
+	out := make([]NavUser, 0, len(env.Resp.Users.User))
+	for _, u := range env.Resp.Users.User {
+		if u.Username != "" {
+			out = append(out, NavUser{Username: u.Username, Name: u.Name, IsAdmin: u.AdminRole})
+		}
+	}
+	return out, nil
 }

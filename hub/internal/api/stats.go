@@ -64,7 +64,7 @@ func (s *Server) statsCircle(w http.ResponseWriter, r *http.Request, me string) 
 		s.fail(w, err)
 		return
 	}
-	rows, err := s.DB.R.QueryContext(r.Context(), `SELECT username FROM memberships WHERE circle_id = ? AND share_stats = 1`, c.ID)
+	rows, err := s.DB.R.QueryContext(r.Context(), `SELECT username FROM active_memberships WHERE circle_id = ? AND share_stats = 1`, c.ID)
 	if err != nil {
 		s.fail(w, err)
 		return

@@ -35,6 +35,14 @@ Public repos: **no deployment-specific names, hosts, IPs or people in code, docs
   automatically on creation ("visible from the start" is the concept). Users may leave it and
   re-join it at any time (`POST /api/v1/circles/everyone/join`, no invite needed). It has no owner;
   only server admins (Navidrome admins, see §3) may rename it. It cannot be deleted.
+- **User sync** (optional, §6): with Navidrome admin credentials configured, the hub mirrors
+  Navidrome's user list (`getUsers`) at startup and periodically, so new users are in
+  `everyone` before their first login or play. Users deleted from Navidrome are **disabled**:
+  invisible everywhere (lists, member counts, live, feed, stats), sessions revoked, data kept;
+  they are re-enabled if they reappear (or log in / play again).
+- **Excluded users** (`CERCLE_EXCLUDED_USERS`): service accounts that never exist in Cercle —
+  never created or auto-joined, their ingest events are accepted and dropped, session login →
+  `403 excluded_user`; an existing user newly excluded is removed from all circles at startup.
 - **Sharing flags** — per *(user, circle)* membership, all default **true**:
   - `share_live` — what I'm playing right now (and paused/position)
   - `share_history` — my individual plays / feed items
@@ -279,6 +287,10 @@ rule** for the calling user:
 | `TZ` | `UTC` | stats bucketing |
 | `TRUSTED_HEADER`, `TRUSTED_PROXIES` | `` | optional reverse-proxy auth |
 | `CERCLE_LOG_LEVEL` | `info` | |
+| `NAVIDROME_ADMIN_USER`, `NAVIDROME_ADMIN_PASSWORD` | `` | optional admin creds enabling user sync (both or neither; token auth only, never logged) |
+| `CERCLE_USER_SYNC_INTERVAL` | `15m` | user sync period (≥ 1m), plus once at startup |
+| `CERCLE_EXCLUDED_USERS` | `` | comma list of service accounts, case-insensitive (e.g. `admin`) |
+| `CERCLE_EVERYONE_NAME`, `CERCLE_EVERYONE_DESCRIPTION` | `` | applied to the `everyone` circle at startup only when set (else an API rename is kept) |
 
 Schema migrations: embedded numbered SQL files, applied at start in a transaction, tracked in
 `schema_migrations`. Graceful shutdown on SIGTERM.
@@ -403,3 +415,15 @@ Gaps the contract left open, as implemented in `hub/` (machine-readable: `docs/o
 - Rooms: the creator auto-joins; joining needs circle membership; host hand-over goes to the
   earliest `joined_at`; ≤ 200 pending requests, queue ≤ 1000; empty `track_id` → `null`; closed
   rooms are deleted.
+
+**User sync / exclusions**
+- Disabling is a `users.disabled_at` timestamp; every visibility/list/count read goes through an
+  `active_memberships` view, so memberships, plays and comments are kept untouched. Any proof of
+  existence (login, plugin event, sync) re-enables. A sync that fails or returns an empty list
+  changes nothing.
+- Subsonic `getUsers` has no display-name field, so sync only sets `display_name` if a server
+  sends `name`; otherwise names come from the plugin's `user.name` or the user's own edit.
+- An excluded user with a valid session or trusted-header identity gets `403 excluded_user` on
+  every authenticated endpoint; the Subsonic shim answers them with an empty `nowPlaying`.
+- Purging a newly excluded owner hands the circle to the earliest-joined admin, else member; a
+  circle they were alone in is deleted. Their sessions are revoked and live state dropped.

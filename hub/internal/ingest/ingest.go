@@ -163,6 +163,9 @@ func (s *Service) Process(ctx context.Context, ev *Event) (bool, error) {
 	if ev.User.Username == "" {
 		return false, nil
 	}
+	if s.Users.IsExcluded(ev.User.Username) {
+		return true, nil // service account: accepted, dropped
+	}
 	player := Player{}
 	if ev.Player != nil {
 		player = *ev.Player

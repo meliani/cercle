@@ -48,6 +48,9 @@ type fakeNavidrome struct {
 	users map[string]fakeUser
 	down  bool
 	calls int
+	// getUsersSawPassword records any getUsers call made with p= (must never happen).
+	getUsersSawPassword bool
+	getUsersCalls       int
 }
 
 type fakeUser struct {
@@ -62,7 +65,20 @@ func newFakeNavidrome() *fakeNavidrome {
 		"bob":   {password: "pw-bob", apiKey: "key-bob"},
 		"carol": {password: "pw-carol", apiKey: "key-carol"},
 		"dave":  {password: "pw-dave", apiKey: "key-dave"},
+		"admin": {password: "pw-admin", apiKey: "key-admin", admin: true},
 	}}
+}
+
+func (f *fakeNavidrome) addUser(name string, admin bool) {
+	f.mu.Lock()
+	f.users[name] = fakeUser{password: "pw-" + name, apiKey: "key-" + name, admin: admin}
+	f.mu.Unlock()
+}
+
+func (f *fakeNavidrome) removeUser(name string) {
+	f.mu.Lock()
+	delete(f.users, name)
+	f.mu.Unlock()
 }
 
 func (f *fakeNavidrome) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -74,6 +90,12 @@ func (f *fakeNavidrome) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
+	if r.URL.Path == "/rest/getUsers.view" {
+		f.getUsersCalls++
+		if q.Get("p") != "" {
+			f.getUsersSawPassword = true
+		}
+	}
 	fail := func() {
 		_, _ = io.WriteString(w, `{"subsonic-response":{"status":"failed","version":"1.16.1","error":{"code":40,"message":"Wrong username or password"}}}`)
 	}
@@ -103,6 +125,16 @@ func (f *fakeNavidrome) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/rest/ping.view":
 	case "/rest/tokenInfo.view":
 		resp["tokenInfo"] = map[string]string{"username": who}
+	case "/rest/getUsers.view":
+		if !f.users[who].admin {
+			_, _ = io.WriteString(w, `{"subsonic-response":{"status":"failed","error":{"code":50,"message":"not authorized"}}}`)
+			return
+		}
+		list := []map[string]any{}
+		for name, u := range f.users {
+			list = append(list, map[string]any{"username": name, "adminRole": u.admin, "email": name + "@example.com"})
+		}
+		resp["users"] = map[string]any{"user": list}
 	case "/rest/getUser.view":
 		target := q.Get("username")
 		if target != who && !f.users[who].admin {
@@ -157,19 +189,20 @@ func newEnv(t *testing.T, opts ...envOpt) *env {
 	for _, o := range opts {
 		o(cfg)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	d, err := db.Open(ctx, cfg.DBPath)
+	d, err := db.Open(context.Background(), cfg.DBPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { d.Close() })
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel) // runs before d.Close (LIFO)
 	clk := &clock{t: t0}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	srv := New(cfg, d, auth.NewHTTPNavidrome(navTS.URL), "test", log, clk.Now)
-	if err := srv.Rooms.Load(ctx); err != nil {
+	if err := srv.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
+	<-srv.SyncDone
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(func() { srv.Hub.Close(); ts.Close() })
 	return &env{t: t, srv: srv, ts: ts, nav: nav, navTS: navTS, clock: clk, base: cfg.BasePath, tokens: map[string]string{}}

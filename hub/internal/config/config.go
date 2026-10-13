@@ -23,6 +23,27 @@ type Config struct {
 	TrustedHeader  string
 	TrustedProxies []netip.Prefix
 	LogLevel       slog.Level
+
+	// Navidrome user sync (enabled when both admin credentials are set).
+	NavidromeAdminUser     string
+	NavidromeAdminPassword string
+	UserSyncInterval       time.Duration
+	// ExcludedUsers holds lowercased usernames of service accounts.
+	ExcludedUsers map[string]bool
+	// EveryoneName / EveryoneDescription are applied at startup when non-empty.
+	EveryoneName        string
+	EveryoneDescription string
+}
+
+// UserSyncEnabled reports whether Navidrome user sync is configured.
+func (c *Config) UserSyncEnabled() bool {
+	return c.NavidromeAdminUser != "" && c.NavidromeAdminPassword != ""
+}
+
+// IsExcluded reports whether username is an excluded service account
+// (case-insensitive).
+func (c *Config) IsExcluded(username string) bool {
+	return c.ExcludedUsers[strings.ToLower(strings.TrimSpace(username))]
 }
 
 // FromEnv builds a Config from getenv (usually os.Getenv).
@@ -35,6 +56,12 @@ func FromEnv(getenv func(string) string) (*Config, error) {
 		BasePath:      NormalizeBasePath(getenv("CERCLE_BASE_PATH")),
 		CORSOrigins:   splitList(getenv("CERCLE_CORS_ORIGINS")),
 		TrustedHeader: strings.TrimSpace(getenv("TRUSTED_HEADER")),
+
+		NavidromeAdminUser:     strings.TrimSpace(getenv("NAVIDROME_ADMIN_USER")),
+		NavidromeAdminPassword: getenv("NAVIDROME_ADMIN_PASSWORD"),
+		ExcludedUsers:          map[string]bool{},
+		EveryoneName:           strings.TrimSpace(getenv("CERCLE_EVERYONE_NAME")),
+		EveryoneDescription:    strings.TrimSpace(getenv("CERCLE_EVERYONE_DESCRIPTION")),
 	}
 	var errs []error
 	if c.NavidromeURL == "" {
@@ -61,6 +88,20 @@ func FromEnv(getenv func(string) string) (*Config, error) {
 	}
 	if c.TrustedHeader != "" && len(c.TrustedProxies) == 0 {
 		errs = append(errs, errors.New("TRUSTED_HEADER requires TRUSTED_PROXIES"))
+	}
+	if (c.NavidromeAdminUser == "") != (c.NavidromeAdminPassword == "") {
+		errs = append(errs, errors.New("NAVIDROME_ADMIN_USER and NAVIDROME_ADMIN_PASSWORD must be set together"))
+	}
+	iv, err := time.ParseDuration(def(getenv("CERCLE_USER_SYNC_INTERVAL"), "15m"))
+	if err != nil || iv < time.Minute {
+		errs = append(errs, fmt.Errorf("CERCLE_USER_SYNC_INTERVAL %q: want a duration of at least 1m", getenv("CERCLE_USER_SYNC_INTERVAL")))
+	}
+	c.UserSyncInterval = iv
+	for _, u := range splitList(getenv("CERCLE_EXCLUDED_USERS")) {
+		c.ExcludedUsers[strings.ToLower(u)] = true
+	}
+	if n := len([]rune(c.EveryoneName)); n > 100 {
+		errs = append(errs, errors.New("CERCLE_EVERYONE_NAME must be at most 100 characters"))
 	}
 	switch strings.ToLower(def(getenv("CERCLE_LOG_LEVEL"), "info")) {
 	case "debug":

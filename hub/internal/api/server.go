@@ -27,6 +27,7 @@ import (
 	"github.com/meliani/cercle/hub/internal/stats"
 	"github.com/meliani/cercle/hub/internal/subsonic"
 	"github.com/meliani/cercle/hub/internal/users"
+	"github.com/meliani/cercle/hub/internal/usersync"
 	"github.com/meliani/cercle/hub/internal/visibility"
 	"github.com/meliani/cercle/hub/internal/ws"
 )
@@ -47,6 +48,10 @@ type Server struct {
 	Ingest   *ingest.Service
 	Hub      *ws.Hub
 	Subsonic *subsonic.Handler
+	// Syncer is nil unless Navidrome user sync is configured.
+	Syncer *usersync.Syncer
+	// SyncDone is closed after the first user sync (immediately when disabled).
+	SyncDone chan struct{}
 	Version  string
 	Now      func() time.Time
 	Log      *slog.Logger
@@ -66,6 +71,7 @@ func New(cfg *config.Config, d *db.DB, nav auth.Navidrome, version string, log *
 	hub := ws.New(log)
 	vis := visibility.New(d.R, now)
 	us := users.New(d, now)
+	us.Excluded = cfg.IsExcluded
 	lv := live.New(vis, us, hub, now, log)
 	fd := &feed.Service{DB: d, Vis: vis, Users: us, Pub: hub, Now: now}
 	s := &Server{
@@ -78,7 +84,12 @@ func New(cfg *config.Config, d *db.DB, nav auth.Navidrome, version string, log *
 		Rooms:    rooms.New(d, now),
 		Ingest:   &ingest.Service{Secret: []byte(cfg.IngestSecret), DB: d, Users: us, Live: lv, Feed: fd, Now: now, Log: log},
 		Hub:      hub,
+		SyncDone: make(chan struct{}),
 		ensured:  map[string]bool{},
+	}
+	if lister, ok := nav.(auth.UserLister); ok && cfg.UserSyncEnabled() {
+		s.Syncer = &usersync.Syncer{Nav: lister, AdminUser: cfg.NavidromeAdminUser, AdminPassword: cfg.NavidromeAdminPassword,
+			DB: d, Users: us, Vis: vis, Live: lv, Now: now, Log: log}
 	}
 	s.Subsonic = &subsonic.Handler{Nav: nav, Users: us, Live: lv, Limiter: s.Limiter,
 		TrustedProxies: cfg.TrustedProxies, Version: version, Now: now, Log: log}
@@ -102,10 +113,22 @@ func New(cfg *config.Config, d *db.DB, nav auth.Navidrome, version string, log *
 	return s
 }
 
-// Start loads persisted state and runs background loops until ctx ends.
+// Start loads persisted state, applies startup configuration (everyone
+// circle naming, excluded users) and runs background loops until ctx ends.
 func (s *Server) Start(ctx context.Context) error {
 	if err := s.Rooms.Load(ctx); err != nil {
 		return err
+	}
+	if err := s.applyEveryoneNaming(ctx); err != nil {
+		return err
+	}
+	if err := s.purgeExcluded(ctx); err != nil {
+		return err
+	}
+	if s.Syncer != nil {
+		go s.Syncer.Run(ctx, s.Cfg.UserSyncInterval, s.SyncDone)
+	} else {
+		close(s.SyncDone)
 	}
 	go s.Live.Run(ctx, 5*time.Second)
 	go func() {
@@ -295,6 +318,9 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 func (s *Server) resolve(ctx context.Context, r *http.Request, allowQuery bool) (string, error) {
 	if s.Cfg.TrustedHeader != "" && auth.FromTrustedProxy(r, s.Cfg.TrustedProxies) {
 		if u := strings.TrimSpace(r.Header.Get(s.Cfg.TrustedHeader)); u != "" {
+			if s.Users.IsExcluded(u) {
+				return "", users.ErrExcluded
+			}
 			s.ensuredMu.Lock()
 			done := s.ensured[u]
 			s.ensuredMu.Unlock()
@@ -313,7 +339,11 @@ func (s *Server) resolve(ctx context.Context, r *http.Request, allowQuery bool) 
 	if tok == "" && allowQuery {
 		tok = r.URL.Query().Get("token")
 	}
-	return s.Sessions.Lookup(ctx, tok)
+	u, err := s.Sessions.Lookup(ctx, tok)
+	if err == nil && s.Users.IsExcluded(u) {
+		return "", users.ErrExcluded
+	}
+	return u, err
 }
 
 func (s *Server) authenticateWS(ctx context.Context, r *http.Request) (string, error) {
@@ -327,6 +357,10 @@ func (s *Server) authenticateWS(ctx context.Context, r *http.Request) (string, e
 func (s *Server) authed(h handler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		u, err := s.resolve(r.Context(), r, false)
+		if errors.Is(err, users.ErrExcluded) {
+			writeError(w, http.StatusForbidden, "excluded_user", "this account is excluded from Cercle")
+			return
+		}
 		if err != nil {
 			if !errors.Is(err, auth.ErrNoSession) {
 				s.Log.Error("auth", "err", err)
@@ -375,6 +409,10 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		return
 	case err != nil:
 		s.fail(w, err)
+		return
+	}
+	if s.Users.IsExcluded(id.Username) {
+		writeError(w, http.StatusForbidden, "excluded_user", "this account is excluded from Cercle")
 		return
 	}
 	if err := s.Users.EnsureTx(r.Context(), id.Username, users.EnsureOpts{IsAdmin: &id.IsAdmin}); err != nil {
@@ -433,6 +471,8 @@ func (s *Server) fail(w http.ResponseWriter, err error) {
 	switch {
 	case errors.As(err, &ae):
 		writeError(w, ae.status, ae.code, ae.message)
+	case errors.Is(err, users.ErrExcluded):
+		writeError(w, http.StatusForbidden, "excluded_user", "this account is excluded from Cercle")
 	case errors.Is(err, model.ErrNotFound), errors.Is(err, sql.ErrNoRows):
 		writeError(w, http.StatusNotFound, "not_found", "not found")
 	case errors.Is(err, model.ErrForbidden):

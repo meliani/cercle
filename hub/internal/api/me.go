@@ -158,8 +158,8 @@ func (s *Server) delHidden(w http.ResponseWriter, r *http.Request, me string) {
 // --- users ------------------------------------------------------------
 
 func (s *Server) listUsers(w http.ResponseWriter, r *http.Request, me string) {
-	rows, err := s.DB.R.QueryContext(r.Context(), `SELECT DISTINCT b.username FROM memberships a
-		JOIN memberships b ON b.circle_id = a.circle_id WHERE a.username = ? AND b.username <> ?`, me, me)
+	rows, err := s.DB.R.QueryContext(r.Context(), `SELECT DISTINCT b.username FROM active_memberships a
+		JOIN active_memberships b ON b.circle_id = a.circle_id WHERE a.username = ? AND b.username <> ?`, me, me)
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -236,7 +236,7 @@ func (s *Server) getUser(w http.ResponseWriter, r *http.Request, me string) {
 		s.fail(w, err)
 		return
 	}
-	circles, err := s.circlesWhere(r, me, `c.id IN (SELECT a.circle_id FROM memberships a JOIN memberships b
+	circles, err := s.circlesWhere(r, me, `c.id IN (SELECT a.circle_id FROM active_memberships a JOIN active_memberships b
 		ON b.circle_id = a.circle_id WHERE a.username = ? AND b.username = ?)`, me, subject)
 	if err != nil {
 		s.fail(w, err)

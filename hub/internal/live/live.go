@@ -100,6 +100,18 @@ func (s *Service) PlaybackState(ctx context.Context, user, state string, t *mode
 	s.Refresh(ctx, user)
 }
 
+// Drop forgets user's live state (disabled or excluded user) and announces
+// live_end to everyone who may have seen it.
+func (s *Service) Drop(ctx context.Context, user string, extra ...string) {
+	s.mu.Lock()
+	_, had := s.m[user]
+	delete(s.m, user)
+	s.mu.Unlock()
+	if had {
+		s.Refresh(ctx, user, extra...)
+	}
+}
+
 // Get returns the user's live state if any.
 func (s *Service) Get(user string) (State, bool) {
 	now := s.Now().UnixMilli()

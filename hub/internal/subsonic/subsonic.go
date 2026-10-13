@@ -132,8 +132,12 @@ func (h *Handler) validate(ctx context.Context, c auth.Creds) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := h.Users.EnsureTx(ctx, id.Username, users.EnsureOpts{IsAdmin: &id.IsAdmin}); err != nil {
-		return "", err
+	// Excluded service accounts are not created; they share no circle, so
+	// they simply see an empty nowPlaying.
+	if !h.Users.IsExcluded(id.Username) {
+		if err := h.Users.EnsureTx(ctx, id.Username, users.EnsureOpts{IsAdmin: &id.IsAdmin}); err != nil {
+			return "", err
+		}
 	}
 	h.mu.Lock()
 	if len(h.cache) > 10000 {

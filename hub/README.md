@@ -43,6 +43,30 @@ The contract is [`docs/CONTRACT.md`](../docs/CONTRACT.md) (authoritative, includ
 | `TRUSTED_HEADER` | `` | Optional: header carrying the username set by a trusted reverse proxy |
 | `TRUSTED_PROXIES` | `` | CIDRs/IPs of proxies trusted for `TRUSTED_HEADER` and `X-Forwarded-For` |
 | `CERCLE_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` (JSON logs on stdout) |
+| `NAVIDROME_ADMIN_USER` | `` | Optional Navidrome admin account for user sync (set both or neither) |
+| `NAVIDROME_ADMIN_PASSWORD` | `` | Its password; only a salted token (`t`/`s`) is ever sent, never logged |
+| `CERCLE_USER_SYNC_INTERVAL` | `15m` | How often to sync users from Navidrome (≥ `1m`; also once at startup) |
+| `CERCLE_EXCLUDED_USERS` | `` | Comma-separated service accounts (case-insensitive), e.g. `admin` |
+| `CERCLE_EVERYONE_NAME` | `` | If set, applied to the `everyone` circle at startup (default name "Everyone") |
+| `CERCLE_EVERYONE_DESCRIPTION` | `` | If set, applied likewise (default "Everyone on this server") |
+
+### Users: sync and exclusions
+
+Without sync, a user appears in Cercle (and in `everyone`) at their first login or first play.
+With `NAVIDROME_ADMIN_USER`/`NAVIDROME_ADMIN_PASSWORD` set, the hub calls Subsonic `getUsers` at
+startup and every `CERCLE_USER_SYNC_INTERVAL`: new Navidrome users are created and join
+`everyone` right away, `is_admin` follows `adminRole`, and users deleted from Navidrome are
+*disabled* — hidden from lists, member counts, live and feed, sessions revoked, data kept — and
+re-enabled if they come back. A dedicated admin account is fine; list it in
+`CERCLE_EXCLUDED_USERS` if it should not appear in Cercle.
+
+Excluded users are never created or auto-joined, their plugin events are accepted and dropped,
+and they cannot log in (`403 excluded_user`). Adding an existing user to the list removes them
+from every circle at the next start (ownership passes to the senior admin, else the senior
+member; a circle they were alone in is deleted).
+
+Subsonic `getUsers` carries no display name, so display names still come from the plugin
+(when it sends `user.name`) or from the user's own edit; until then the username is shown.
 
 ## Run with Docker
 
